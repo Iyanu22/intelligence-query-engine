@@ -1,22 +1,15 @@
 {
   "name": "intelligence-query-engine",
   "version": "1.0.0",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "description": "",
-  "start": "node index.js",
-  "seed": "node seed.js",
-  "build": "npm rebuild better-sqlite3",
+  "scripts": {
+    "start": "node index.js",
+    "seed": "node seed.js"
+  },
   "dependencies": {
-    "better-sqlite3": "^12.9.0",
-    "dotenv": "^17.4.2",
-    "express": "^5.2.1",
-    "pg": "^8.20.0",
-    "uuid": "^14.0.0"
+    "dotenv": "^16.0.0",
+    "express": "^4.18.0",
+    "pg": "^8.11.0",
+    "uuid": "^9.0.0"
   }
 }
