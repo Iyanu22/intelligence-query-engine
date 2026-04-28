@@ -28,6 +28,7 @@ router.get("/github/callback", async (req, res) => {
   try {
     // Exchange code for access token
     const tokenData = await exchangeCodeForToken(code);
+     console.log("Token data from GitHub:", JSON.stringify(tokenData));
     if (!tokenData.access_token) {
       return res.status(400).json({ status: "error", message: "Failed to get GitHub token" });
     }
