@@ -1,24 +1,54 @@
 require("dotenv").config();
 const express = require("express");
+const morgan = require("morgan");
+const rateLimit = require("express-rate-limit");
 const { v7: uuidv7 } = require("uuid");
 const https = require("https");
 const { pool, initDB } = require("./database");
+const { requireAuth, requireAdmin, requireApiVersion } = require("./auth");
+const authRoutes = require("./routes/authRoutes");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
+app.use(morgan("combined")); // Logging
+
+// CORS
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Version");
+  if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
 });
 
-app.get("/", (req, res) => {
-  res.status(200).json({ status: "success", message: "Profile Intelligence Service v2" });
+// Rate limiting — auth endpoints
+const authLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  message: { status: "error", message: "Too many requests, please try again later" }
 });
 
+// Rate limiting — all other endpoints
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  message: { status: "error", message: "Too many requests, please try again later" }
+});
+
+// Root
+app.get("/", (req, res) => {
+  res.status(200).json({ status: "success", message: "Insighta Labs+ API v1" });
+});
+
+// Auth routes (rate limited)
+app.use("/auth", authLimiter, authRoutes);
+
+// API routes (auth + versioning + rate limiting required)
+app.use("/api", apiLimiter, requireAuth, requireApiVersion);
+
+// Helper functions
 function fetchJSON(url) {
   return new Promise((resolve, reject) => {
     https.get(url, (res) => {
@@ -39,8 +69,8 @@ function classifyAge(age) {
   return "senior";
 }
 
-// ── POST /api/profiles ─────────────────────────────────────────────
-app.post("/api/profiles", async (req, res) => {
+// ── POST /api/profiles (admin only) ────────────────────────────────
+app.post("/api/profiles", requireAdmin, async (req, res) => {
   const { name } = req.body;
   if (name === undefined || name === "") return res.status(400).json({ status: "error", message: "Missing or empty name" });
   if (typeof name !== "string") return res.status(422).json({ status: "error", message: "Name must be a string" });
@@ -149,18 +179,26 @@ app.get("/api/profiles/search", async (req, res) => {
 
   const totalResult = await pool.query(`SELECT COUNT(*) as count FROM profiles ${where}`, params);
   const total = parseInt(totalResult.rows[0].count);
+  const total_pages = Math.ceil(total / limit);
   const data = await pool.query(`SELECT * FROM profiles ${where} LIMIT $${i++} OFFSET $${i++}`, [...params, limit, offset]);
 
-  return res.status(200).json({ status: "success", page, limit, total, data: data.rows });
+  return res.status(200).json({ status: "success", page, limit, total, total_pages, data: data.rows });
 });
 
 // ── GET /api/profiles ──────────────────────────────────────────────
 app.get("/api/profiles", async (req, res) => {
   const validSortBy = ["age", "created_at", "gender_probability"];
   const validOrder = ["asc", "desc"];
-  const sortBy = req.query.sort_by && validSortBy.includes(req.query.sort_by) ? req.query.sort_by : "created_at";
-  const order = req.query.order && validOrder.includes(req.query.order.toLowerCase()) ? req.query.order.toLowerCase() : "asc";
 
+  if (req.query.sort_by && !validSortBy.includes(req.query.sort_by)) {
+    return res.status(400).json({ status: "error", message: "Invalid query parameters" });
+  }
+  if (req.query.order && !validOrder.includes(req.query.order.toLowerCase())) {
+    return res.status(400).json({ status: "error", message: "Invalid query parameters" });
+  }
+
+  const sortBy = req.query.sort_by || "created_at";
+  const order = req.query.order ? req.query.order.toLowerCase() : "asc";
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 10));
   const offset = (page - 1) * limit;
@@ -179,9 +217,33 @@ app.get("/api/profiles", async (req, res) => {
 
   const totalResult = await pool.query(`SELECT COUNT(*) as count FROM profiles ${where}`, params);
   const total = parseInt(totalResult.rows[0].count);
+  const total_pages = Math.ceil(total / limit);
   const data = await pool.query(`SELECT * FROM profiles ${where} ORDER BY ${sortBy} ${order} LIMIT $${i++} OFFSET $${i++}`, [...params, limit, offset]);
 
-  return res.status(200).json({ status: "success", page, limit, total, data: data.rows });
+  return res.status(200).json({ status: "success", page, limit, total, total_pages, data: data.rows });
+});
+
+// ── GET /api/profiles/export ───────────────────────────────────────
+app.get("/api/profiles/export", async (req, res) => {
+  let where = "WHERE 1=1";
+  const params = [];
+  let i = 1;
+
+  if (req.query.gender) { where += ` AND LOWER(gender) = LOWER($${i++})`; params.push(req.query.gender); }
+  if (req.query.country_id) { where += ` AND LOWER(country_id) = LOWER($${i++})`; params.push(req.query.country_id); }
+  if (req.query.age_group) { where += ` AND LOWER(age_group) = LOWER($${i++})`; params.push(req.query.age_group); }
+
+  const data = await pool.query(`SELECT * FROM profiles ${where}`, params);
+  const profiles = data.rows;
+
+  const csv = [
+    "id,name,gender,gender_probability,age,age_group,country_id,country_name,country_probability,created_at",
+    ...profiles.map(p => `${p.id},${p.name},${p.gender},${p.gender_probability},${p.age},${p.age_group},${p.country_id},${p.country_name},${p.country_probability},${p.created_at}`)
+  ].join("\n");
+
+  res.setHeader("Content-Type", "text/csv");
+  res.setHeader("Content-Disposition", "attachment; filename=profiles.csv");
+  return res.status(200).send(csv);
 });
 
 // ── GET /api/profiles/:id ──────────────────────────────────────────
@@ -191,15 +253,22 @@ app.get("/api/profiles/:id", async (req, res) => {
   return res.status(200).json({ status: "success", data: result.rows[0] });
 });
 
-// ── DELETE /api/profiles/:id ───────────────────────────────────────
-app.delete("/api/profiles/:id", async (req, res) => {
+// ── DELETE /api/profiles/:id (admin only) ─────────────────────────
+app.delete("/api/profiles/:id", requireAdmin, async (req, res) => {
   const result = await pool.query("SELECT * FROM profiles WHERE id = $1", [req.params.id]);
   if (result.rows.length === 0) return res.status(404).json({ status: "error", message: "Profile not found" });
   await pool.query("DELETE FROM profiles WHERE id = $1", [req.params.id]);
   return res.status(204).send();
 });
 
-// ── START ──────────────────────────────────────────────────────────
+// ── GET /api/users/me ──────────────────────────────────────────────
+app.get("/api/users/me", async (req, res) => {
+  const result = await pool.query("SELECT id, username, email, avatar_url, role, created_at FROM users WHERE id = $1", [req.user.id]);
+  if (result.rows.length === 0) return res.status(404).json({ status: "error", message: "User not found" });
+  return res.status(200).json({ status: "success", data: result.rows[0] });
+});
+
+// Start server
 initDB().then(() => {
   app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 });

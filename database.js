@@ -20,6 +20,31 @@ async function initDB() {
       created_at TEXT
     )
   `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      github_id VARCHAR UNIQUE,
+      username VARCHAR,
+      email VARCHAR,
+      avatar_url VARCHAR,
+      role VARCHAR DEFAULT 'analyst',
+      is_active BOOLEAN DEFAULT true,
+      last_login_at TIMESTAMP,
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS refresh_tokens (
+      id TEXT PRIMARY KEY,
+      user_id TEXT REFERENCES users(id),
+      token TEXT UNIQUE,
+      expires_at TIMESTAMP,
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+
   console.log("Database ready");
 }
 
