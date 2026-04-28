@@ -1,5 +1,5 @@
 const express = require("express");
-const https = require("https");
+const fetch = require("node-fetch");
 const { pool } = require("../database");
 const { v4: uuidv4 } = require("uuid");
 const {
@@ -27,14 +27,40 @@ router.get("/github/callback", async (req, res) => {
 
   try {
     // Exchange code for access token
-    const tokenData = await exchangeCodeForToken(code);
-     console.log("Token data from GitHub:", JSON.stringify(tokenData));
+    const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+      },
+      body: JSON.stringify({
+        client_id: process.env.GITHUB_CLIENT_ID,
+        client_secret: process.env.GITHUB_CLIENT_SECRET,
+        code,
+      }),
+    });
+
+    const tokenData = await tokenResponse.json();
+    console.log("Token data:", JSON.stringify(tokenData));
+
     if (!tokenData.access_token) {
-      return res.status(400).json({ status: "error", message: "Failed to get GitHub token" });
+      return res.status(400).json({
+        status: "error",
+        message: "Failed to get GitHub token",
+        detail: tokenData
+      });
     }
 
     // Get GitHub user info
-    const githubUser = await getGithubUser(tokenData.access_token);
+    const userResponse = await fetch("https://api.github.com/user", {
+      headers: {
+        Authorization: `Bearer ${tokenData.access_token}`,
+        "User-Agent": "InsightaLabs",
+        Accept: "application/json",
+      },
+    });
+
+    const githubUser = await userResponse.json();
 
     // Create or update user in database
     const user = await upsertUser(githubUser);
@@ -60,8 +86,8 @@ router.get("/github/callback", async (req, res) => {
       }
     });
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({ status: "error", message: "Authentication failed" });
+    console.error("Auth error:", err);
+    return res.status(500).json({ status: "error", message: "Authentication failed", detail: err.message });
   }
 });
 
@@ -73,7 +99,6 @@ router.post("/refresh", async (req, res) => {
   }
 
   try {
-    // Find refresh token
     const result = await pool.query(
       `SELECT rt.*, u.* FROM refresh_tokens rt
        JOIN users u ON rt.user_id = u.id
@@ -86,8 +111,6 @@ router.post("/refresh", async (req, res) => {
     }
 
     const row = result.rows[0];
-
-    // Delete old refresh token
     await pool.query(`DELETE FROM refresh_tokens WHERE token = $1`, [refresh_token]);
 
     const user = {
@@ -96,7 +119,6 @@ router.post("/refresh", async (req, res) => {
       role: row.role,
     };
 
-    // Issue new tokens
     const newAccessToken = generateAccessToken(user);
     const newRefreshToken = await generateRefreshToken(user.id);
 
@@ -119,61 +141,6 @@ router.post("/logout", async (req, res) => {
   }
   return res.status(200).json({ status: "success", message: "Logged out successfully" });
 });
-
-// Helper: exchange code for GitHub token
-function exchangeCodeForToken(code) {
-  return new Promise((resolve, reject) => {
-    const body = JSON.stringify({
-      client_id: process.env.GITHUB_CLIENT_ID,
-      client_secret: process.env.GITHUB_CLIENT_SECRET,
-      code,
-    });
-
-    const options = {
-      hostname: "github.com",
-      path: "/login/oauth/access_token",
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Content-Length": Buffer.byteLength(body),
-      },
-    };
-
-    const req = https.request(options, (res) => {
-      let data = "";
-      res.on("data", (chunk) => (data += chunk));
-      res.on("end", () => resolve(JSON.parse(data)));
-    });
-    req.on("error", reject);
-    req.write(body);
-    req.end();
-  });
-}
-
-// Helper: get GitHub user info
-function getGithubUser(token) {
-  return new Promise((resolve, reject) => {
-    const options = {
-      hostname: "api.github.com",
-      path: "/user",
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "User-Agent": "InsightaLabs",
-        Accept: "application/json",
-      },
-    };
-
-    const req = https.request(options, (res) => {
-      let data = "";
-      res.on("data", (chunk) => (data += chunk));
-      res.on("end", () => resolve(JSON.parse(data)));
-    });
-    req.on("error", reject);
-    req.end();
-  });
-}
 
 // Helper: create or update user
 async function upsertUser(githubUser) {
