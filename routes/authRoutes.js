@@ -1,8 +1,11 @@
+const express = require("express");
 const fetch = require("node-fetch");
 const crypto = require("crypto");
+const { pool } = require("../database");
+const { v4: uuidv4 } = require("uuid");
+const { generateAccessToken, generateRefreshToken } = require("../auth");
 
-// Store state temporarily (in production use Redis/DB)
-const stateStore = new Map();
+const router = express.Router();
 
 function generatePKCE() {
   const codeVerifier = crypto.randomBytes(32).toString("base64url");
@@ -14,7 +17,6 @@ function generatePKCE() {
 // GET /auth/github
 router.get("/github", (req, res) => {
   const { codeVerifier, codeChallenge, state } = generatePKCE();
-  stateStore.set(state, { codeVerifier, createdAt: Date.now() });
 
   const params = new URLSearchParams({
     client_id: process.env.GITHUB_CLIENT_ID,
@@ -24,6 +26,19 @@ router.get("/github", (req, res) => {
     code_challenge: codeChallenge,
     code_challenge_method: "S256",
   });
+
+  // Store codeVerifier in state cookie
+  res.cookie("pkce_verifier", codeVerifier, {
+    httpOnly: true,
+    maxAge: 5 * 60 * 1000,
+    sameSite: "lax",
+  });
+  res.cookie("oauth_state", state, {
+    httpOnly: true,
+    maxAge: 5 * 60 * 1000,
+    sameSite: "lax",
+  });
+
   res.redirect(`https://github.com/login/oauth/authorize?${params}`);
 });
 
@@ -31,14 +46,27 @@ router.get("/github", (req, res) => {
 router.get("/github/callback", async (req, res) => {
   const { code, state } = req.query;
 
-  if (!code) return res.status(400).json({ status: "error", message: "Missing code" });
-  if (!state) return res.status(400).json({ status: "error", message: "Missing state" });
+  if (!code) {
+    return res.status(400).json({ status: "error", message: "Missing code" });
+  }
+  if (!state) {
+    return res.status(400).json({ status: "error", message: "Missing state" });
+  }
 
-  const stored = stateStore.get(state);
-  if (!stored) return res.status(400).json({ status: "error", message: "Invalid or expired state" });
+  const storedState = req.cookies?.oauth_state;
+  const codeVerifier = req.cookies?.pkce_verifier;
 
-  stateStore.delete(state);
-  const { codeVerifier } = stored;
+  if (!storedState || storedState !== state) {
+    return res.status(400).json({ status: "error", message: "Invalid state" });
+  }
+
+  if (!codeVerifier) {
+    return res.status(400).json({ status: "error", message: "Missing code verifier" });
+  }
+
+  // Clear PKCE cookies
+  res.clearCookie("pkce_verifier");
+  res.clearCookie("oauth_state");
 
   try {
     const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
@@ -61,7 +89,7 @@ router.get("/github/callback", async (req, res) => {
       return res.status(400).json({
         status: "error",
         message: "Failed to get GitHub token",
-        detail: tokenData
+        detail: tokenData,
       });
     }
 
@@ -93,10 +121,82 @@ router.get("/github/callback", async (req, res) => {
         email: user.email,
         avatar_url: user.avatar_url,
         role: user.role,
-      }
+      },
     });
   } catch (err) {
     console.error("Auth error:", err);
     return res.status(500).json({ status: "error", message: "Authentication failed", detail: err.message });
   }
 });
+
+// POST /auth/refresh
+router.post("/refresh", async (req, res) => {
+  const { refresh_token } = req.body;
+  if (!refresh_token) {
+    return res.status(400).json({ status: "error", message: "Refresh token required" });
+  }
+
+  try {
+    const result = await pool.query(
+      `SELECT rt.*, u.id as user_id, u.username, u.role FROM refresh_tokens rt
+       JOIN users u ON rt.user_id = u.id
+       WHERE rt.token = $1 AND rt.expires_at > NOW()`,
+      [refresh_token]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(401).json({ status: "error", message: "Invalid or expired refresh token" });
+    }
+
+    const row = result.rows[0];
+    await pool.query(`DELETE FROM refresh_tokens WHERE token = $1`, [refresh_token]);
+
+    const user = { id: row.user_id, username: row.username, role: row.role };
+    const newAccessToken = generateAccessToken(user);
+    const newRefreshToken = await generateRefreshToken(user.id);
+
+    return res.status(200).json({
+      status: "success",
+      access_token: newAccessToken,
+      refresh_token: newRefreshToken,
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ status: "error", message: "Token refresh failed" });
+  }
+});
+
+// POST /auth/logout
+router.post("/logout", async (req, res) => {
+  const { refresh_token } = req.body;
+  if (refresh_token) {
+    await pool.query(`DELETE FROM refresh_tokens WHERE token = $1`, [refresh_token]);
+  }
+  return res.status(200).json({ status: "success", message: "Logged out successfully" });
+});
+
+// Helper: create or update user
+async function upsertUser(githubUser) {
+  const existing = await pool.query(
+    `SELECT * FROM users WHERE github_id = $1`,
+    [String(githubUser.id)]
+  );
+
+  if (existing.rows.length > 0) {
+    const updated = await pool.query(
+      `UPDATE users SET username=$1, email=$2, avatar_url=$3, last_login_at=NOW()
+       WHERE github_id=$4 RETURNING *`,
+      [githubUser.login, githubUser.email, githubUser.avatar_url, String(githubUser.id)]
+    );
+    return updated.rows[0];
+  }
+
+  const created = await pool.query(
+    `INSERT INTO users (id, github_id, username, email, avatar_url, role, is_active, last_login_at, created_at)
+     VALUES ($1,$2,$3,$4,$5,'analyst',true,NOW(),NOW()) RETURNING *`,
+    [uuidv4(), String(githubUser.id), githubUser.login, githubUser.email, githubUser.avatar_url]
+  );
+  return created.rows[0];
+}
+
+module.exports = router;
