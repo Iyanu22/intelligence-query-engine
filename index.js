@@ -2,19 +2,18 @@ require("dotenv").config();
 const express = require("express");
 const morgan = require("morgan");
 const rateLimit = require("express-rate-limit");
-const { v7: uuidv7 } = require("uuid");
+const cookieParser = require("cookie-parser");
 const https = require("https");
 const { pool, initDB } = require("./database");
-// const { requireAuth, requireAdmin, requireApiVersion } = require("./auth");
 const { requireAuth, requireAdmin, requireApiVersion, generateAccessToken, generateRefreshToken } = require("./auth");
 const authRoutes = require("./routes/authRoutes");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const cookieParser = require("cookie-parser");
+
 app.use(cookieParser());
 app.use(express.json());
-app.use(morgan("combined")); // Logging
+app.use(morgan("combined"));
 
 // CORS
 app.use((req, res, next) => {
@@ -25,14 +24,13 @@ app.use((req, res, next) => {
   next();
 });
 
-// Rate limiting — auth endpoints
+// Rate limiters
 const authLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 10,
   message: { status: "error", message: "Too many requests, please try again later" }
 });
 
-// Rate limiting — all other endpoints
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 60,
@@ -44,11 +42,35 @@ app.get("/", (req, res) => {
   res.status(200).json({ status: "success", message: "Insighta Labs+ API v1" });
 });
 
-// Auth routes (rate limited)
-// app.use("/auth", authLimiter, authRoutes);
-app.get("/auth/github", authLimiter, (req, res, next) => next());
+// Auth routes
+app.use("/auth", authLimiter, authRoutes);
 
-// API routes (auth + versioning + rate limiting required)
+// Demo auth endpoint for testing
+app.post("/auth/demo", authLimiter, async (req, res) => {
+  const { github_username } = req.body;
+  if (!github_username) {
+    return res.status(400).json({ status: "error", message: "github_username required" });
+  }
+  try {
+    const result = await pool.query("SELECT * FROM users WHERE username = $1", [github_username]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ status: "error", message: "User not found" });
+    }
+    const user = result.rows[0];
+    const accessToken = generateAccessToken(user);
+    const refreshToken = await generateRefreshToken(user.id);
+    return res.status(200).json({
+      status: "success",
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      user: { id: user.id, username: user.username, role: user.role }
+    });
+  } catch (err) {
+    return res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+// API middleware
 app.use("/api", apiLimiter, requireAuth, requireApiVersion);
 
 // Helper functions
@@ -72,7 +94,19 @@ function classifyAge(age) {
   return "senior";
 }
 
-// ── POST /api/profiles (admin only) ────────────────────────────────
+const { v4: uuidv4 } = require("uuid");
+
+// ── GET /api/users/me ──────────────────────────────────────────────
+app.get("/api/users/me", async (req, res) => {
+  const result = await pool.query(
+    "SELECT id, username, email, avatar_url, role, created_at FROM users WHERE id = $1",
+    [req.user.id]
+  );
+  if (result.rows.length === 0) return res.status(404).json({ status: "error", message: "User not found" });
+  return res.status(200).json({ status: "success", data: result.rows[0] });
+});
+
+// ── POST /api/profiles (admin only) ───────────────────────────────
 app.post("/api/profiles", requireAdmin, async (req, res) => {
   const { name } = req.body;
   if (name === undefined || name === "") return res.status(400).json({ status: "error", message: "Missing or empty name" });
@@ -106,7 +140,7 @@ app.post("/api/profiles", requireAdmin, async (req, res) => {
     const country_id = topCountry.country_id;
     const country_name = topCountry.country_name || "";
     const country_probability = topCountry.probability;
-    const id = uuidv7();
+    const id = uuidv4();
     const created_at = new Date().toISOString();
 
     const result = await pool.query(
@@ -114,7 +148,6 @@ app.post("/api/profiles", requireAdmin, async (req, res) => {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
       [id, name, gender, gender_probability, age, age_group, country_id, country_name, country_probability, created_at]
     );
-
     return res.status(201).json({ status: "success", data: result.rows[0] });
   } catch (err) {
     console.error(err);
@@ -225,9 +258,6 @@ app.get("/api/profiles", async (req, res) => {
 
   return res.status(200).json({ status: "success", page, limit, total, total_pages, data: data.rows });
 });
-app.get("/test-headers", (req, res) => {
-  res.json({ headers: req.headers });
-});
 
 // ── GET /api/profiles/export ───────────────────────────────────────
 app.get("/api/profiles/export", async (req, res) => {
@@ -267,57 +297,7 @@ app.delete("/api/profiles/:id", requireAdmin, async (req, res) => {
   return res.status(204).send();
 });
 
-// ── GET /api/users/me ──────────────────────────────────────────────
-app.get("/api/users/me", async (req, res) => {
-  const result = await pool.query("SELECT id, username, email, avatar_url, role, created_at FROM users WHERE id = $1", [req.user.id]);
-  if (result.rows.length === 0) return res.status(404).json({ status: "error", message: "User not found" });
-  return res.status(200).json({ status: "success", data: result.rows[0] });
-});
-
 // Start server
 initDB().then(() => {
   app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-});
-// Demo auth endpoint for testing (returns tokens for existing users)
-app.post("/auth/demo", authLimiter, async (req, res) => {
-  const { github_username } = req.body;
-  if (!github_username) {
-    return res.status(400).json({ status: "error", message: "github_username required" });
-  }
-
-  try {
-    const result = await pool.query(
-      "SELECT * FROM users WHERE username = $1",
-      [github_username]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ status: "error", message: "User not found" });
-    }
-
-    const user = result.rows[0];
-    const accessToken = generateAccessToken(user);
-    const refreshToken = await generateRefreshToken(user.id);
-
-    return res.status(200).json({
-      status: "success",
-      access_token: accessToken,
-      refresh_token: refreshToken,
-      user: {
-        id: user.id,
-        username: user.username,
-        role: user.role,
-      }
-    });
-  } catch (err) {
-    return res.status(500).json({ status: "error", message: err.message });
-  }
-  app.get("/api/users/me", requireAuth, requireApiVersion, async (req, res) => {
-  const result = await pool.query(
-    "SELECT id, username, email, avatar_url, role, created_at FROM users WHERE id = $1",
-    [req.user.id]
-  );
-  if (result.rows.length === 0) return res.status(404).json({ status: "error", message: "User not found" });
-  return res.status(200).json({ status: "success", data: result.rows[0] });
-});
 });
