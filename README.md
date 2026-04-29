@@ -36,3 +36,70 @@ Deletes a profile. Returns 204 No Content.
 - Node.js + Express
 - PostgreSQL (Neon)
 - UUID v7
+# Insighta Labs+ Backend
+
+Secure REST API for the Insighta Labs demographic intelligence platform.
+
+## Live URL
+https://intelligence-query-engine-green.vercel.app
+
+## System Architecture
+- Backend: Node.js + Express
+- Database: PostgreSQL (Neon)
+- Auth: GitHub OAuth + JWT tokens
+- Deployment: Vercel
+
+## Authentication Flow
+1. User visits `/auth/github` → redirected to GitHub
+2. GitHub redirects back with code
+3. Backend exchanges code for GitHub token
+4. Backend retrieves user info from GitHub
+5. Backend creates/updates user in database
+6. Backend issues access token (3 min) + refresh token (7 days)
+
+## Token Handling
+- Access token: JWT, expires in 3 minutes
+- Refresh token: UUID, expires in 7 days
+- Old refresh token invalidated on each refresh
+
+## Role Enforcement
+- `admin` — can create and delete profiles, full access
+- `analyst` — read-only access to profiles
+- Default role: `analyst`
+- Enforced via middleware on all `/api/*` endpoints
+
+## Natural Language Parsing
+Rule-based parsing converts English queries to SQL filters:
+- "young" → age 16–24
+- "males/females" → gender filter
+- "from nigeria" → country_id=NG
+- "above 30" → min_age=30
+- "adult/senior/child/teenager" → age_group filter
+
+## API Endpoints
+
+### Auth
+- `GET /auth/github` — redirect to GitHub OAuth
+- `GET /auth/github/callback` — handle OAuth callback
+- `POST /auth/refresh` — refresh tokens
+- `POST /auth/logout` — invalidate refresh token
+
+### Profiles (require auth + X-API-Version: 1)
+- `GET /api/profiles` — list with filters, sorting, pagination
+- `GET /api/profiles/search?q=` — natural language search
+- `GET /api/profiles/:id` — get single profile
+- `POST /api/profiles` — create profile (admin only)
+- `DELETE /api/profiles/:id` — delete profile (admin only)
+- `GET /api/profiles/export` — export CSV
+
+### Users
+- `GET /api/users/me` — get current user
+
+## Rate Limiting
+- Auth endpoints: 10 req/min
+- API endpoints: 60 req/min per user
+
+## Headers Required
+All `/api/*` requests need:
+- `Authorization: Bearer <access_token>`
+- `X-API-Version: 1`
