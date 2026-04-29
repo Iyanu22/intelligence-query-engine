@@ -222,6 +222,9 @@ app.get("/api/profiles", async (req, res) => {
 
   return res.status(200).json({ status: "success", page, limit, total, total_pages, data: data.rows });
 });
+app.get("/test-headers", (req, res) => {
+  res.json({ headers: req.headers });
+});
 
 // ── GET /api/profiles/export ───────────────────────────────────────
 app.get("/api/profiles/export", async (req, res) => {
