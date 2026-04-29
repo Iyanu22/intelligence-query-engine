@@ -311,4 +311,12 @@ app.post("/auth/demo", authLimiter, async (req, res) => {
   } catch (err) {
     return res.status(500).json({ status: "error", message: err.message });
   }
+  app.get("/api/users/me", requireAuth, requireApiVersion, async (req, res) => {
+  const result = await pool.query(
+    "SELECT id, username, email, avatar_url, role, created_at FROM users WHERE id = $1",
+    [req.user.id]
+  );
+  if (result.rows.length === 0) return res.status(404).json({ status: "error", message: "User not found" });
+  return res.status(200).json({ status: "success", data: result.rows[0] });
+});
 });
