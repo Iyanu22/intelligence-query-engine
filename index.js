@@ -44,7 +44,8 @@ app.get("/", (req, res) => {
 
 // Auth routes
 app.use("/auth", authLimiter, authRoutes);
-
+const uploadRoutes = require("./routes/uploadRoutes");
+app.use("/api/upload", apiLimiter, requireAuth, uploadRoutes);
 // Demo auth endpoint for testing
 app.post("/auth/demo", authLimiter, async (req, res) => {
   const { github_username } = req.body;
