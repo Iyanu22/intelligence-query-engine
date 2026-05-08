@@ -1,0 +1,6 @@
+name,gender,age,age_group,country_id,country_name,gender_probability,country_probability
+Test User One,male,25,adult,NG,Nigeria,0.95,0.80
+Test User Two,female,30,adult,KE,Kenya,0.90,0.75
+Bad Row,,25,adult,NG,Nigeria,0.95,0.80
+Invalid Age Row,male,-5,adult,NG,Nigeria,0.95,0.80
+Test User Three,male,17,teenager,GH,Ghana,0.85,0.70
